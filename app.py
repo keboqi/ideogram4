@@ -232,8 +232,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--gemma_max_new_tokens",
         type=int,
-        default=int(os.environ.get("GEMMA_MAX_NEW_TOKENS", "65536")),
-        help="Maximum tokens for local Gemma prompt JSON generation (default: 65536).",
+        default=int(os.environ.get("GEMMA_MAX_NEW_TOKENS", "2048")),
+        help="Maximum tokens for local Gemma prompt JSON generation (default: 2048).",
     )
     parser.add_argument(
         "--gemma_debug_dir",
@@ -280,7 +280,7 @@ else:
         gemma_assistant_model_id = os.environ.get("GEMMA_ASSISTANT_MODEL", "google/gemma-4-12B-it-assistant")
         gemma_torch_dtype = "bfloat16"
         gemma_quantize = False
-        gemma_max_new_tokens = int(os.environ.get("GEMMA_MAX_NEW_TOKENS", "65536"))
+        gemma_max_new_tokens = int(os.environ.get("GEMMA_MAX_NEW_TOKENS", "2048"))
         gemma_debug_dir = os.environ.get("GEMMA_DEBUG_DIR", "gemma_debug")
         gemma_enable_thinking = False
         gemma_thinking_effort = "concise"
@@ -1616,7 +1616,7 @@ with gr.Blocks(title="Ideogram 4 Standalone") as demo:
                     value=args.gemma_max_new_tokens,
                     precision=0,
                     label="Gemma max new tokens",
-                    info="Default is 65536; increase if local Gemma truncates long structured JSON captions.",
+                    info="Default is 2048; increase if local Gemma truncates long structured JSON captions.",
                 )
                 gemma_enable_thinking = gr.Checkbox(
                     label="Gemma enable thinking",
