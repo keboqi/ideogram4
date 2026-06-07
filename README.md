@@ -144,7 +144,11 @@ FLUX.2 [dev] (32B), and HunyuanImage 3.0 (80B MoE):
 ### Install
 
 ```bash
+pip install -r requirements.txt
+pip install -U packaging ninja psutil
+pip install flash-attn --no-build-isolation --no-cache-dir
 pip install .
+python app.py
 ```
 
 If you plan to modify the code, install in editable mode instead so changes

@@ -80,14 +80,18 @@ class Ideogram4MRoPE(nn.Module):
     self.head_dim = head_dim
 
   @torch.no_grad()
-  def forward(self, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+  def forward(
+    self,
+    position_ids: torch.Tensor,
+    compute_dtype: torch.dtype = torch.float32,
+  ) -> tuple[torch.Tensor, torch.Tensor]:
     # position_ids: (B, L, 3) of int.
     assert position_ids.ndim == 3 and position_ids.shape[-1] == 3
     batch_size, seq_len, _ = position_ids.shape
 
     # (3, B, inv_freq_size, L)
-    pos = position_ids.permute(2, 0, 1).to(dtype=torch.float32)  # type: ignore[arg-type]
-    inv_freq = self.inv_freq.to(dtype=torch.float32)[None, None, :, None].expand(
+    pos = position_ids.permute(2, 0, 1).to(dtype=compute_dtype)  # type: ignore[arg-type]
+    inv_freq = self.inv_freq.to(dtype=compute_dtype)[None, None, :, None].expand(
       3, batch_size, -1, 1
     )  # type: ignore[index]
     freqs = inv_freq @ pos.unsqueeze(2)
@@ -130,7 +134,7 @@ class Ideogram4Attention(nn.Module):
   def forward(
     self,
     x: torch.Tensor,
-    segment_ids: torch.Tensor,
+    segment_ids: torch.Tensor | None,
     cos: torch.Tensor,
     sin: torch.Tensor,
   ) -> torch.Tensor:
@@ -151,9 +155,16 @@ class Ideogram4Attention(nn.Module):
     q, k = _apply_rotary_pos_emb(q, k, cos, sin)
 
     # Block-diagonal mask from segment ids: (B, 1, L, L), True = attend.
-    attn_mask = (segment_ids.unsqueeze(2) == segment_ids.unsqueeze(1)).unsqueeze(1)
+    # No mask is needed for the common no-padding case, which lets PyTorch use
+    # its fastest eligible SDPA backend.
+    if segment_ids is None:
+      attn_mask = None
+    else:
+      attn_mask = (segment_ids.unsqueeze(2) == segment_ids.unsqueeze(1)).unsqueeze(1)
 
-    out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+    out = F.scaled_dot_product_attention(
+      q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=False
+    )
     out = out.transpose(1, 2).reshape(batch_size, seq_len, self.hidden_size)
     return self.o(out)
 
@@ -167,6 +178,14 @@ class Ideogram4MLP(nn.Module):
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
     return self.w2(F.silu(self.w1(x)) * self.w3(x))
+
+  def forward_chunked(self, x: torch.Tensor, chunk_size: int) -> torch.Tensor:
+    if chunk_size <= 0 or x.shape[1] <= chunk_size:
+      return self.forward(x)
+    return torch.cat(
+      [self.forward(chunk) for chunk in x.split(chunk_size, dim=1)],
+      dim=1,
+    )
 
 
 class Ideogram4TransformerBlock(nn.Module):
@@ -188,11 +207,12 @@ class Ideogram4TransformerBlock(nn.Module):
     self.ffn_norm2 = Ideogram4RMSNorm(hidden_size, eps=norm_eps)
 
     self.adaln_modulation = nn.Linear(adanln_dim, 4 * hidden_size, bias=True)
+    self.ffn_chunk_size = 0
 
   def forward(
     self,
     x: torch.Tensor,
-    segment_ids: torch.Tensor,
+    segment_ids: torch.Tensor | None,
     cos: torch.Tensor,
     sin: torch.Tensor,
     adaln_input: torch.Tensor,
@@ -211,7 +231,9 @@ class Ideogram4TransformerBlock(nn.Module):
       sin=sin,
     )
     x = x + gate_msa * self.attention_norm2(attn_out)
-    x = x + gate_mlp * self.ffn_norm2(self.feed_forward(self.ffn_norm1(x) * scale_mlp))
+    ffn_in = self.ffn_norm1(x) * scale_mlp
+    ffn_out = self.feed_forward.forward_chunked(ffn_in, int(self.ffn_chunk_size or 0))
+    x = x + gate_mlp * self.ffn_norm2(ffn_out)
     return x
 
 
@@ -303,6 +325,20 @@ class Ideogram4Transformer(nn.Module):
       out_channels=config.in_channels,
       adanln_dim=config.adanln_dim,
     )
+    self.rope_compute_dtype = torch.float32
+
+  def set_runtime_options(
+    self,
+    *,
+    ffn_chunk_size: int | None = None,
+    rope_compute_dtype: torch.dtype | None = None,
+  ) -> None:
+    if ffn_chunk_size is not None:
+      chunk_size = max(0, int(ffn_chunk_size))
+      for layer in self.layers:
+        layer.ffn_chunk_size = chunk_size
+    if rope_compute_dtype is not None:
+      self.rope_compute_dtype = rope_compute_dtype
 
   @property
   def device(self) -> torch.device:
@@ -315,7 +351,7 @@ class Ideogram4Transformer(nn.Module):
     x: torch.Tensor,
     t: torch.Tensor,
     position_ids: torch.Tensor,
-    segment_ids: torch.Tensor,
+    segment_ids: torch.Tensor | None,
     indicator: torch.Tensor,
   ) -> torch.Tensor:
     """Velocity prediction.
@@ -325,7 +361,8 @@ class Ideogram4Transformer(nn.Module):
       x: (B, L, in_channels) noise tokens.
       t: (B,) or (B, L) flow-matching time in [0, 1].
       position_ids: (B, L, 3) (t, h, w) positions for MRoPE.
-      segment_ids: (B, L) sample id within a packed batch.
+      segment_ids: (B, L) sample id within a packed batch, or None for a
+        no-padding sequence where every token can attend to every other token.
       indicator: (B, L) per-token role: LLM_TOKEN_INDICATOR or OUTPUT_IMAGE_INDICATOR.
 
     Returns:
@@ -368,7 +405,8 @@ class Ideogram4Transformer(nn.Module):
     )
     h = h + image_indicator_embedding
 
-    cos, sin = self.rotary_emb(position_ids)
+    rope_compute_dtype = getattr(self, "rope_compute_dtype", torch.float32)
+    cos, sin = self.rotary_emb(position_ids, compute_dtype=rope_compute_dtype)
     cos = cos.to(h.dtype)
     sin = sin.to(h.dtype)
 

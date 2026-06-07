@@ -253,15 +253,34 @@ def ideogram_magic_prompt(
   return json.dumps(json_prompt, ensure_ascii=False, separators=(",", ":"))
 
 
-def strip_aspect_ratio_and_bboxes(caption: str, *, strip_bboxes: bool = True) -> str:
-  data = json.loads(caption)
-  data.pop("aspect_ratio", None)
-  if strip_bboxes:
+def strip_aspect_ratio(caption: str) -> str:
+  """Only remove aspect_ratio from the JSON caption."""
+  try:
+    data = json.loads(caption)
+    data.pop("aspect_ratio", None)
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+  except Exception:
+    return caption
+
+
+def strip_bboxes(caption: str) -> str:
+  """Only remove bounding boxes (bboxes) from the JSON caption."""
+  try:
+    data = json.loads(caption)
     elements = data.get("compositional_deconstruction", {}).get("elements", [])
     for element in elements:
       if isinstance(element, dict):
         element.pop("bbox", None)
-  return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+  except Exception:
+    return caption
+
+
+def strip_aspect_ratio_and_bboxes(caption: str, *, remove_bboxes: bool = True) -> str:
+  caption = strip_aspect_ratio(caption)
+  if remove_bboxes:
+    caption = strip_bboxes(caption)
+  return caption
 
 
 # --------------------------------------------------------------------------- #
@@ -293,7 +312,7 @@ class ClaudeSonnetMagicPromptV1(MagicPrompt):
       extra_body={"reasoning": {"enabled": False}},
       timeout=self.timeout,
     )
-    return strip_aspect_ratio_and_bboxes(caption, strip_bboxes=self.strip_bboxes)
+    return strip_aspect_ratio_and_bboxes(caption, remove_bboxes=self.strip_bboxes)
 
 
 class ClaudeOpusMagicPromptV1(MagicPrompt):
@@ -320,7 +339,7 @@ class ClaudeOpusMagicPromptV1(MagicPrompt):
       extra_body={"reasoning": {"enabled": False}},
       timeout=self.timeout,
     )
-    return strip_aspect_ratio_and_bboxes(caption, strip_bboxes=self.strip_bboxes)
+    return strip_aspect_ratio_and_bboxes(caption, remove_bboxes=self.strip_bboxes)
 
 
 class Ideogram4MagicPromptV1(MagicPrompt):
@@ -350,7 +369,7 @@ class Ideogram4MagicPromptV1(MagicPrompt):
       self.api_key,
       timeout=self.timeout,
     )
-    return strip_aspect_ratio_and_bboxes(caption, strip_bboxes=self.strip_bboxes)
+    return strip_aspect_ratio_and_bboxes(caption, remove_bboxes=self.strip_bboxes)
 
 
 MAGIC_PROMPTS: dict[str, type[MagicPrompt]] = {
