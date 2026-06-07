@@ -222,6 +222,9 @@ if __name__ == "__main__":
     parser.add_argument("--gemma_model_id", type=str, 
                         default=os.environ.get("GEMMA_MODEL", "google/gemma-4-12B-it"), 
                         help="Hugging Face model ID for the local Gemma upsampler (default: google/gemma-4-12B-it)")
+    parser.add_argument("--gemma_assistant_model_id", type=str, 
+                        default=os.environ.get("GEMMA_ASSISTANT_MODEL", "google/gemma-4-12B-it-assistant"), 
+                        help="Hugging Face model ID for the MTP assistant (drafter) model to speed up generation via speculative decoding. Set to empty string to disable.")
     parser.add_argument("--gemma_torch_dtype", type=str, default="bfloat16", choices=["bfloat16", "float16", "float32"], 
                         help="Data type to load local Gemma if not quantized (default: bfloat16)")
     parser.add_argument("--gemma_quantize", action="store_true", 
@@ -262,6 +265,7 @@ else:
         pid_auto_setup = True
         pid_keep_ideogram_loaded = True
         gemma_model_id = os.environ.get("GEMMA_MODEL", "google/gemma-4-12B-it")
+        gemma_assistant_model_id = os.environ.get("GEMMA_ASSISTANT_MODEL", "google/gemma-4-12B-it-assistant")
         gemma_torch_dtype = "bfloat16"
         gemma_quantize = False
         gemma_max_new_tokens = int(os.environ.get("GEMMA_MAX_NEW_TOKENS", "65536"))
@@ -835,10 +839,11 @@ def decode_ideogram_latents_with_pid(
 # Lazy-loaded local Gemma models
 gemma_tokenizer = None
 gemma_model = None
+gemma_assistant_model = None
 
 def load_gemma_local():
     """Lazily load the local Gemma model on the first request to minimize startup memory."""
-    global gemma_tokenizer, gemma_model
+    global gemma_tokenizer, gemma_model, gemma_assistant_model
     if gemma_model is not None:
         return
         
@@ -879,6 +884,25 @@ def load_gemma_local():
             trust_remote_code=True
         )
     print(f"Local Gemma loaded successfully in {time.perf_counter() - t_gemma:.1f}s", flush=True)
+
+    if args.gemma_assistant_model_id:
+        print(f"Loading MTP assistant model '{args.gemma_assistant_model_id}'...", flush=True)
+        t_assistant = time.perf_counter()
+        if not args.gemma_quantize:
+            gemma_assistant_model = AutoModelForCausalLM.from_pretrained(
+                args.gemma_assistant_model_id,
+                torch_dtype=torch_dtype,
+                device_map="auto",
+                trust_remote_code=True
+            )
+        else:
+            gemma_assistant_model = AutoModelForCausalLM.from_pretrained(
+                args.gemma_assistant_model_id,
+                quantization_config=quantization_config,
+                device_map="auto",
+                trust_remote_code=True
+            )
+        print(f"MTP assistant loaded successfully in {time.perf_counter() - t_assistant:.1f}s", flush=True)
 
 
 def strip_markdown_fences(text):
@@ -1091,6 +1115,9 @@ def generate_gemma_text(messages, *, max_new_tokens=None, do_sample=False):
         "max_new_tokens": max_new_tokens,
         "do_sample": do_sample,
     }
+    if gemma_assistant_model is not None:
+        generate_kwargs["assistant_model"] = gemma_assistant_model
+        
     if do_sample:
         generate_kwargs.update({"temperature": 0.1, "top_p": 0.95})
     if gemma_tokenizer.eos_token_id is not None:
@@ -1319,7 +1346,7 @@ def generate(
     prompt,
     mode="Turbo - 12 steps",
     quantization=None,
-    upsampler=UPSAMPLE_IDEOGRAM_REMOTE,
+    upsampler=UPSAMPLE_GEMMA_LOCAL,
     ideogram_api_key="",
     gemma_max_new_tokens=None,
     reuse_upsample_cache=True,
@@ -1523,7 +1550,7 @@ with gr.Blocks(title="Ideogram 4 Standalone") as demo:
             with gr.Accordion("Advanced Settings", open=False):
                 upsampler = gr.Radio(
                     choices=UPSAMPLERS,
-                    value=UPSAMPLE_IDEOGRAM_REMOTE,
+                    value=UPSAMPLE_GEMMA_LOCAL,
                     label="Prompt upsampler",
                     info="Rewrite into Ideogram's native JSON caption using the remote Ideogram API or local Gemma.",
                 )
