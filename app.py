@@ -241,6 +241,11 @@ if __name__ == "__main__":
         default=os.environ.get("GEMMA_DEBUG_DIR", "gemma_debug"),
         help="Directory for full raw Gemma responses when JSON parsing fails. Set empty to disable file dumps.",
     )
+    parser.add_argument(
+        "--gemma_enable_thinking",
+        action="store_true",
+        help="Enable native thinking mode for Gemma 4 (requires more tokens/time, improves reasoning).",
+    )
     args = parser.parse_args()
 else:
     # Fallback default args for non-CLI imports
@@ -270,6 +275,7 @@ else:
         gemma_quantize = False
         gemma_max_new_tokens = int(os.environ.get("GEMMA_MAX_NEW_TOKENS", "65536"))
         gemma_debug_dir = os.environ.get("GEMMA_DEBUG_DIR", "gemma_debug")
+        gemma_enable_thinking = False
     args = Args()
 
 # Set memory optimization environment variables
@@ -1107,9 +1113,14 @@ def dump_gemma_raw_response(label, text):
         print(f"[gemma] Warning: could not save full raw {label} response: {exc!r}", flush=True)
 
 
-def generate_gemma_text(messages, *, max_new_tokens=None, do_sample=False):
+def generate_gemma_text(messages, *, max_new_tokens=None, do_sample=False, enable_thinking=False):
     max_new_tokens = normalize_gemma_max_new_tokens(max_new_tokens)
-    input_text = gemma_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    
+    chat_kwargs = {"tokenize": False, "add_generation_prompt": True}
+    if enable_thinking:
+        chat_kwargs["enable_thinking"] = True
+        
+    input_text = gemma_tokenizer.apply_chat_template(messages, **chat_kwargs)
     inputs = gemma_tokenizer(input_text, return_tensors="pt").to("cuda")
     generate_kwargs = {
         "max_new_tokens": max_new_tokens,
@@ -1166,7 +1177,7 @@ def build_manual_upsampler_messages(prompt, width, height):
     return json.dumps(messages, ensure_ascii=False, indent=2)
 
 
-def local_upsample_gemma(prompt, width, height, max_new_tokens=None):
+def local_upsample_gemma(prompt, width, height, max_new_tokens=None, enable_thinking=False):
     """Rewrite the prompt into Ideogram's native JSON caption using the locally served Gemma model."""
     load_gemma_local()
     max_new_tokens = normalize_gemma_max_new_tokens(max_new_tokens)
@@ -1176,8 +1187,8 @@ def local_upsample_gemma(prompt, width, height, max_new_tokens=None):
 
     t_gen = time.perf_counter()
     print("[gemma] Formatting chat template and tokenizing input...", flush=True)
-    print(f"[gemma] Running local autoregressive inference (max_new_tokens={max_new_tokens})...", flush=True)
-    text = generate_gemma_text(messages, max_new_tokens=max_new_tokens, do_sample=False)
+    print(f"[gemma] Running local autoregressive inference (max_new_tokens={max_new_tokens}, enable_thinking={enable_thinking})...", flush=True)
+    text = generate_gemma_text(messages, max_new_tokens=max_new_tokens, do_sample=False, enable_thinking=enable_thinking)
     print(f"[gemma] Local generation complete in {time.perf_counter() - t_gen:.2f}s", flush=True)
 
     # Validate JSON parsing
@@ -1233,12 +1244,13 @@ upsample_cache_lock = threading.RLock()
 upsample_cache_entries = None
 
 
-def upsample_cache_key(prompt, upsampler, width, height, gemma_max_new_tokens=None):
+def upsample_cache_key(prompt, upsampler, width, height, gemma_max_new_tokens=None, gemma_enable_thinking=False):
     """Build a stable cache key for the source prompt and selected upsampler."""
     payload = {
         "schema": UPSAMPLE_CACHE_SCHEMA_VERSION,
         "provider": upsampler,
         "source_prompt": str(prompt or ""),
+        "enable_thinking": bool(gemma_enable_thinking),
     }
 
     cache_material = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -1281,8 +1293,8 @@ def write_upsample_cache():
             print(f"[cache] Warning: could not write upsample cache: {exc!r}", flush=True)
 
 
-def get_cached_upsample(prompt, upsampler, width, height, gemma_max_new_tokens=None):
-    cache_key, _ = upsample_cache_key(prompt, upsampler, width, height, gemma_max_new_tokens)
+def get_cached_upsample(prompt, upsampler, width, height, gemma_max_new_tokens=None, gemma_enable_thinking=False):
+    cache_key, _ = upsample_cache_key(prompt, upsampler, width, height, gemma_max_new_tokens, gemma_enable_thinking)
     with upsample_cache_lock:
         entry = load_upsample_cache().get(cache_key)
         if isinstance(entry, dict) and isinstance(entry.get("result"), str):
@@ -1291,8 +1303,8 @@ def get_cached_upsample(prompt, upsampler, width, height, gemma_max_new_tokens=N
     return None
 
 
-def store_cached_upsample(prompt, upsampler, width, height, result, gemma_max_new_tokens=None):
-    cache_key, metadata = upsample_cache_key(prompt, upsampler, width, height, gemma_max_new_tokens)
+def store_cached_upsample(prompt, upsampler, width, height, result, gemma_max_new_tokens=None, gemma_enable_thinking=False):
+    cache_key, metadata = upsample_cache_key(prompt, upsampler, width, height, gemma_max_new_tokens, gemma_enable_thinking)
     with upsample_cache_lock:
         load_upsample_cache()[cache_key] = {
             "created_at": int(time.time()),
@@ -1302,23 +1314,23 @@ def store_cached_upsample(prompt, upsampler, width, height, result, gemma_max_ne
         write_upsample_cache()
 
 
-def upsample_prompt(prompt, upsampler, width, height, ideogram_api_key="", gemma_max_new_tokens=None, reuse_cache=True):
+def upsample_prompt(prompt, upsampler, width, height, ideogram_api_key="", gemma_max_new_tokens=None, reuse_cache=True, gemma_enable_thinking=False):
     if upsampler == UPSAMPLE_NONE:
         return prompt
     if upsampler not in (UPSAMPLE_IDEOGRAM_REMOTE, UPSAMPLE_GEMMA_LOCAL):
         raise ValueError(f"Unknown prompt upsampler: {upsampler}")
 
     if reuse_cache:
-        cached_result = get_cached_upsample(prompt, upsampler, width, height, gemma_max_new_tokens)
+        cached_result = get_cached_upsample(prompt, upsampler, width, height, gemma_max_new_tokens, gemma_enable_thinking)
         if cached_result is not None:
             return cached_result
 
     if upsampler == UPSAMPLE_IDEOGRAM_REMOTE:
         final_prompt = remote_upsample_ideogram(prompt, int(width), int(height), ideogram_api_key)
     else:
-        final_prompt = local_upsample_gemma(prompt, int(width), int(height), gemma_max_new_tokens)
+        final_prompt = local_upsample_gemma(prompt, int(width), int(height), gemma_max_new_tokens, gemma_enable_thinking)
 
-    store_cached_upsample(prompt, upsampler, width, height, final_prompt, gemma_max_new_tokens)
+    store_cached_upsample(prompt, upsampler, width, height, final_prompt, gemma_max_new_tokens, gemma_enable_thinking)
     return final_prompt
 
 
@@ -1351,6 +1363,7 @@ def generate(
     gemma_max_new_tokens=None,
     reuse_upsample_cache=True,
     strip_prompt=True,
+    gemma_enable_thinking=False,
     width=1024,
     height=1024,
     seed=0,
@@ -1401,6 +1414,7 @@ def generate(
             ideogram_api_key=ideogram_api_key,
             gemma_max_new_tokens=gemma_max_new_tokens,
             reuse_cache=reuse_upsample_cache,
+            gemma_enable_thinking=gemma_enable_thinking,
         )
         print(f"[timing] Ideogram remote upsampling finished: {time.perf_counter() - t_up:.2f}s", flush=True)
     elif upsampler == UPSAMPLE_GEMMA_LOCAL:
@@ -1414,6 +1428,7 @@ def generate(
             ideogram_api_key=ideogram_api_key,
             gemma_max_new_tokens=gemma_max_new_tokens,
             reuse_cache=reuse_upsample_cache,
+            gemma_enable_thinking=gemma_enable_thinking,
         )
         print(f"[timing] Local Gemma upsampling finished: {time.perf_counter() - t_up:.2f}s", flush=True)
     elif upsampler != UPSAMPLE_NONE:
@@ -1576,6 +1591,11 @@ with gr.Blocks(title="Ideogram 4 Standalone") as demo:
                     label="Gemma max new tokens",
                     info="Default is 65536; increase if local Gemma truncates long structured JSON captions.",
                 )
+                gemma_enable_thinking = gr.Checkbox(
+                    label="Gemma enable thinking",
+                    value=args.gemma_enable_thinking,
+                    info="Enable native thinking mode for Gemma 4 (slower, but improves layout reasoning).",
+                )
                 quick_aspect_ratio = gr.Radio(
                     choices=list(ASPECT_RATIO_PRESETS.keys()),
                     value=DEFAULT_ASPECT_RATIO_PRESET,
@@ -1686,6 +1706,7 @@ with gr.Blocks(title="Ideogram 4 Standalone") as demo:
             gemma_max_new_tokens,
             reuse_upsample_cache,
             strip_prompt,
+            gemma_enable_thinking,
             width,
             height,
             seed,
