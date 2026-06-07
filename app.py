@@ -1127,6 +1127,7 @@ def generate_gemma_text(messages, *, max_new_tokens=None, do_sample=False, enabl
     chat_kwargs = {"tokenize": False, "add_generation_prompt": True}
     if enable_thinking:
         chat_kwargs["enable_thinking"] = True
+        do_sample = True  # Force sampling to avoid greedy deterministic loops
         
     input_text = gemma_tokenizer.apply_chat_template(messages, **chat_kwargs)
     inputs = gemma_tokenizer(input_text, return_tensors="pt").to("cuda")
@@ -1134,11 +1135,15 @@ def generate_gemma_text(messages, *, max_new_tokens=None, do_sample=False, enabl
         "max_new_tokens": max_new_tokens,
         "do_sample": do_sample,
     }
+    
+    if enable_thinking:
+        generate_kwargs.update({"temperature": 0.4, "top_p": 0.95, "repetition_penalty": 1.1})
+    elif do_sample:
+        generate_kwargs.update({"temperature": 0.1, "top_p": 0.95})
+
     if gemma_assistant_model is not None:
         generate_kwargs["assistant_model"] = gemma_assistant_model
         
-    if do_sample:
-        generate_kwargs.update({"temperature": 0.1, "top_p": 0.95})
     if gemma_tokenizer.eos_token_id is not None:
         generate_kwargs["pad_token_id"] = gemma_tokenizer.eos_token_id
 
