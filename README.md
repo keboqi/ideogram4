@@ -147,14 +147,16 @@ FLUX.2 [dev] (32B), and HunyuanImage 3.0 (80B MoE):
 pip install -r requirements.txt
 pip install -U packaging ninja psutil
 pip install flash-attn --no-build-isolation --no-cache-dir
-pip install .
 python app.py
 ```
 
-If you plan to modify the code, install in editable mode instead so changes
-under `src/ideogram4/` take effect without reinstalling:
+*(Optional)* If you plan to import `ideogram4` as a package in other scripts outside of this directory, or if you want to modify the code, you can install the package:
 
 ```bash
+# Standard install
+pip install .
+
+# Editable install for development
 pip install -e .
 ```
 
