@@ -315,6 +315,7 @@ from ideogram4.magic_prompt import build_messages, reorder_caption_keys, strip_a
 # V4 presets from the official repository pipeline.
 MODES = {
     "Turbo - 12 steps": "V4_TURBO_12",
+    "Fast Quality - 14 steps": "V4_FAST_QUALITY_14",
     "Default - 20 steps": "V4_DEFAULT_20",
     "Quality - 48 steps": "V4_QUALITY_48",
 }

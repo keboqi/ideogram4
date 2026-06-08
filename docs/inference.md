@@ -19,12 +19,15 @@ python run_inference.py \
 | :----- | :---: | :----------- | :--: | :---: |
 | `V4_QUALITY_48` | 48 | 45 steps @ gw=7, then 3 polish steps @ gw=3 | 0.0 | 1.5 |
 | `V4_DEFAULT_20` | 20 | 18 steps @ gw=7, then 2 polish steps @ gw=3 | 0.0 | 1.75 |
+| `V4_FAST_QUALITY_14` | 14 | 14 steps @ gw=3 | 0.0 | 1.75 |
 | `V4_TURBO_12` | 12 | 11 steps @ gw=7, then 1 polish step @ gw=3 | 0.5 | 1.75 |
 
 `V4_QUALITY_48` is the default. Fewer steps trade quality for speed. The full
 registry lives in
 [`ideogram4.sampler_configs.PRESETS`](../src/ideogram4/sampler_configs.py); add a
 new entry there to define your own.
+`V4_FAST_QUALITY_14` is a low-CFG fast-quality preset inspired by ComfyUI
+workflows that favor 14 Euler/simple steps at guidance 3.
 
 ## Key Parameters
 

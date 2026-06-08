@@ -8,6 +8,12 @@ from ideogram4.scheduler import SamplerParameters
 # Each preset does the first N_main sampling steps at gw=7, then N_cleanup
 # polish steps at gw=3.
 PRESETS: dict[str, SamplerParameters] = {
+  "V4_FAST_QUALITY_14": SamplerParameters(
+    num_steps=14,
+    guidance_schedule=(3.0,) * 14,
+    mu=0.0,
+    std=1.75,
+  ),
   "V4_QUALITY_48": SamplerParameters(
     num_steps=48,
     guidance_schedule=(3.0,) * 3 + (7.0,) * 45,
